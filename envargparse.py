@@ -148,7 +148,7 @@ class EnvArgHelpFormatter(argparse.HelpFormatter):
 
 
 # An example mix-in.
-class DefEnvArgHelpFormatter\
+class EnvArgDefaultsHelpFormatter\
         ( EnvArgHelpFormatter
         , argparse.ArgumentDefaultsHelpFormatter
         ):
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     # An example program:
     parser = EnvArgParser\
             ( prog="Test Program"
-            , formatter_class=DefEnvArgHelpFormatter
+            , formatter_class=EnvArgDefaultsHelpFormatter
             )
 
     parser.add_argument\
