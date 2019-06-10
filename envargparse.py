@@ -101,9 +101,8 @@ class EnvArgParser(argparse.ArgumentParser):
             # actions.
             if isinstance(v, self.env_i):
                 fv = v.f(v.a, v.k, v.v, arg_extras)
-                if fv is argparse.SUPPRESS:
-                    delattr(namespace, k)
-                else:
+                delattr(namespace, k)
+                if fv is not argparse.SUPPRESS:
                     # "_parse_known_args::take_action" checks for action
                     # conflicts. For simplicity we don't.
                     v.a(self, namespace, fv, v.k)
