@@ -2,8 +2,28 @@
 
 import argparse
 import os
+import collections
 
 import shlex
+
+
+EnvArgRecord = collections.namedtuple\
+        ( "EnvArgRecord"
+        , [ "a"
+          , "k"
+          , "f"
+          , "v"
+          , "p"
+          ]
+        )
+# This record is attached to all actions presenting the environment-variable
+# key, whether or not the environment-variable value is actually set.
+EnvArgRecord.__doc__ = "Record of associated environment-variable values."
+EnvArgRecord.a.__doc__ = "action"
+EnvArgRecord.k.__doc__ = "key"
+EnvArgRecord.f.__doc__ = "function"
+EnvArgRecord.v.__doc__ = "value"
+EnvArgRecord.p.__doc__ = "present"
 
 
 # Notes:
@@ -17,10 +37,20 @@ class EnvArgParser(argparse.ArgumentParser):
     #           on matching actions.
     # env_f:    The keyword to "add_argument". Defaults to "env_var_parse" if
     #           not provided.
-    # env_i:    Basic container type to identify unfilled arguments.
     env_k = "env_var"
     env_f = "env_var_parse"
-    env_i = type("env_i", (object,), {})
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # The ArgumentParser class would have been more flexible having
+        # _parse_known_args::seen_actions available at the class-level. It was
+        # probably kept within the parsing function because it is only valid up
+        # until and must be reset before a subsequent parse.
+        #
+        # Nonetheless, here we are. It is generally useful to know whether a
+        # command-line argument has been provided.
+        self.seen_actions = set()
 
     def add_argument(self, *args, **kwargs):
         map_f = (lambda m,k,f=None,d=False:
@@ -61,20 +91,26 @@ class EnvArgParser(argparse.ArgumentParser):
         #   (""       , False, "")
         #   ("",        True,  "RIDICULOUS_VALUE")
 
-        # Add the identifier to all valid environment variable actions for
-        # later access by i.e. the help formatter.
+        # Add the record to all valid environment variable actions for later
+        # access by i.e. the help formatter.
         if env_k[1]:
             if env_v[1] and action.required:
                 action.required = False
-            i = self.env_i()
-            i.a = action
-            i.k = env_k[2]
-            i.f = env_f[2]
-            i.v = env_v[2]
-            i.p = env_v[1]
+            i = EnvArgRecord\
+                    ( a=action
+                    , k = env_k[2]
+                    , f = env_f[2]
+                    , v = env_v[2]
+                    , p = env_v[1]
+                    )
             setattr(action, env_k[0], i)
 
         return action
+
+    def _add_action(self, action):
+        # Count how often each action is called, among other useful features.
+        action = EnvArgAction(action)
+        return super()._add_action(action)
 
     # Overriding "_parse_known_args" is better than "parse_known_args":
     #   * The namespace will already have been created.
@@ -82,46 +118,185 @@ class EnvArgParser(argparse.ArgumentParser):
     def _parse_known_args(self, arg_strings, namespace):
         """precedence: cmd args > env var > preexisting namespace > defaults"""
 
+        # If parsing happens again, the set of seen actions should be cleared.
+        # The public parsing methods:
+        #   * parse_args
+        #   * parse_known_args
+        #   * parse_intermixed_args
+        #   * parse_known_intermixed_args
+        # TODO
+        self.seen_actions.clear()
+
+        namespace, arg_extras = super()._parse_known_args(arg_strings, namespace)
+
         for action in self._actions:
             if action.dest is argparse.SUPPRESS:
+                continue
+            # An action can be seen but not called if its value is SUPPRESS.
+            # For example, "_get_values" will produce SUPPRESS when parsing an
+            # option without any arguments if "nargs" is OPTIONAL ("?") and
+            # "const" is SUPPRESS. When this happens we should process the
+            # matching environment variable argument.
+            #
+            # There is no reason an action would be called but not seen, but if
+            # this happens we should also process the matching environment
+            # variable argument.
+            if action.call_count > 0 and action in self.seen_actions:
                 continue
             try:
                 i = getattr(action, self.env_k)
             except AttributeError:
                 continue
+            if i.a is not action:
+                continue
             if not i.p:
                 continue
-            setattr(namespace, action.dest, i)
-
-        namespace, arg_extras = super()._parse_known_args(arg_strings, namespace)
-
-        for k,v in vars(namespace).copy().items():
-            # Setting "env_i" on the action is more effective than using an
-            # empty unique object() and mapping namespace attributes back to
-            # actions.
-            if isinstance(v, self.env_i):
-                fv = v.f(v.a, v.k, v.v, arg_extras)
-                delattr(namespace, k)
-                if fv is not argparse.SUPPRESS:
-                    # "_parse_known_args::take_action" checks for action
-                    # conflicts. For simplicity we don't.
-                    v.a(self, namespace, fv, v.k)
+            # Actions provided via the command-line are marked as seen when
+            # super()._parse_known_args calls self._get_values. Actions
+            # provided via the environment may be marked as seen if the "env_f"
+            # function calls self._get_values. This happens with the default
+            # function, self.env_var_parse, but is not guaranteed. Therefore we
+            # now mark the action as seen even though it may be redundant.
+            self.seen_actions.add(action)
+            # Parse the environment variable.
+            v,e = i.f(self, i.a, i.k, i.v, arg_extras)
+            # From the main loop of "_parse_known_args". Treat additional
+            # environment variable arguments just like additional command-line
+            # arguments (which will eventually raise an exception).
+            arg_extras.extend(e)
+            # Ignore suppressed values.
+            if v is argparse.SUPPRESS:
+                continue
+            # "_parse_known_args::take_action" checks for action
+            # conflicts. For simplicity we don't.
+            i.a(self, namespace, v, i.k)
 
         return (namespace, arg_extras)
 
-    def env_var_parse(self, a, k, v, e):
+    # Environment variable parsers need not be methods. The parser (self) will
+    # be passed in as the first argument anyway. Feel free to raise
+    # ArgumentError here. Returns the 2-tuple (used_values, extra_values).
+    @staticmethod
+    def env_var_parse(p, a, k, v, e):
         # Use shlex, yaml, whatever.
         v = shlex.split(v)
 
-        # From "_parse_known_args::consume_optional".
-        n = self._match_argument(a, "A"*len(v))
+        # From "_parse_known_args::consume_optional". Split the list of
+        # arguments into those that will be consumed and extra arguments.
+        n = p._match_argument(a, "A"*len(v))
 
-        # From the main loop of "_parse_known_args". Treat additional
-        # environment variable arguments just like additional command-line
-        # arguments (which will eventually raise an exception).
-        e.extend(v[n:])
+        # Convert/check/etc the value.
+        return (p._get_values(a, v[:n]), v[n:])
 
-        return self._get_values(a, v[:n])
+    # In cooperation with EnvArgAction the _get_value(s) methods allow
+    # overloading their ArgumentParser counterparts on a per-action basis. By
+    # default EnvArgAction calls the matching method from EnvArgParser's base
+    # class, so out-of-the-box there is no behavioral change.
+
+    def _get_values(self, action, arg_strings):
+        # Here we update our own set of seen actions. Mainly for command-line
+        # arguments, but may also be useful for environment-variable parsers.
+        self.seen_actions.add(action)
+
+        return action.get_values(arg_strings, self)
+
+    def _get_value(self, action, arg_string):
+        return action.get_value(arg_string, self)
+
+
+class Container:
+    """A container class. Except names within the "excludes" list, all
+    attribute access is forward to the contained object.
+    """
+    excludes = []
+
+    def exclude(excludes):
+        def decorator(f):
+            excludes.append(f.__name__)
+            return f
+        return decorator
+
+    def __new__(cls, obj, *args, **kwargs):
+        if isinstance(obj, cls):
+            return obj
+        else:
+            return super().__new__(cls)
+
+    def __init__(self, obj):
+        super().__setattr__("object", obj)
+
+    @exclude(excludes)
+    def unwrap(self):
+        return super().__getattribute__("object")
+
+    def __getattribute__(self, name):
+        excludes = type(self).excludes
+
+        if name in excludes:
+            return super().__getattribute__(name)
+        else:
+            return getattr(self.unwrap(), name)
+
+    def __setattr__(self, name, value):
+        excludes = type(self).excludes
+
+        if name in excludes:
+            return super().__setattr__(name, value)
+        else:
+            return setattr(self.unwrap(), name, value)
+
+    def __delattr__(self, name):
+        excludes = type(self).excludes
+
+        if name in excludes:
+            return super().__delattr__(name)
+        else:
+            return delattr(self.unwrap(), name)
+
+
+# Since __call__ uses special method lookup, it isn't possible to replace the
+# __call__ method of an Action instance. The following won't work, for example:
+#
+#   action.__call__ = f(action.__call__).__get__(action, type(action))
+#
+# Therefore we use a container class that forwards all attribute access to
+# contained action, and implement our own __call__. Since __call__ uses special
+# method lookup it bypasses __getattribute__ and doesn't need to be added to
+# the exclusion list.
+class EnvArgAction(Container):
+    """Every Action instance within EnvArgParser is wrapped by this container
+    class, which serves several purposes. It increments a counter each time it
+    is called, which is useful for tracking whether an action has been seen and
+    consumed. In cooperation with EnvArgParser it allows the default
+    ArgumentParser implementation of _get_values/_get_value to be overloaded on
+    a per-action basis:
+        1. EnvArgParser::_get_value(s) calls Action::get_value(s)
+        2. Action::get_value(s) calls super(EnvArgParser)::_get_value(s)
+
+    So by default there is no change to the behavior of _get_value(s).
+    """
+
+    excludes = Container.excludes[:] + ["call_count"]
+
+    def __init__(self, action):
+        super().__init__(action)
+        self.call_count = 0
+
+    def __call__(self, *args, **kwargs):
+        self.call_count += 1
+        return self.unwrap()(*args, **kwargs)
+
+    # The following cooperative methods are fully supported by EnvArgParser.
+    # Though they don't change the default behavior they're a nice showcase for
+    # what's possible and perhaps useful for user-defined child classes.
+
+    @Container.exclude(excludes)
+    def get_values(self, arg_strings, parser):
+        return super(type(parser), parser)._get_values(self, arg_strings)
+
+    @Container.exclude(excludes)
+    def get_value(self, arg_strings, parser):
+        return super(type(parser), parser)._get_value(self, arg_strings)
 
 
 # Derived from "ArgumentDefaultsHelpFormatter".
