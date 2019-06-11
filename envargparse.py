@@ -6,6 +6,8 @@ import collections
 
 import shlex
 
+import decorator
+
 
 EnvArgRecord = collections.namedtuple\
         ( "EnvArgRecord"
@@ -51,6 +53,34 @@ class EnvArgParser(argparse.ArgumentParser):
         # Nonetheless, here we are. It is generally useful to know whether a
         # command-line argument has been provided.
         self.seen_actions = set()
+
+        # There are four public parsing methods:
+        #   * parse_args
+        #   * parse_known_args
+        #   * parse_intermixed_args
+        #   * parse_known_intermixed_args
+        #
+        # The setup and teardown code for each of these methods is handled by
+        # the setup_parse decorator:
+        #   * clear seen_actions
+        #   * fetch environment variables for missing actions
+        #
+        # The *intermixed* methods call parse_known_args twice but this should
+        # not cause the decorator to run more than once. This attribute tracks
+        # the parsing depth; only when it is zero will the setup/teardown code
+        # execute.
+        #
+        # The property version of this attribute ensures it is never below
+        # zero.
+        self._parsing_depth = 0
+
+    @property
+    def parsing_depth(self):
+        return self._parsing_depth
+
+    @parsing_depth.setter
+    def parsing_depth(self, value):
+        self._parsing_depth = max(value, 0)
 
     def add_argument(self, *args, **kwargs):
         map_f = (lambda m,k,f=None,d=False:
@@ -112,23 +142,46 @@ class EnvArgParser(argparse.ArgumentParser):
         action = EnvArgAction(action)
         return super()._add_action(action)
 
-    # Overriding "_parse_known_args" is better than "parse_known_args":
-    #   * The namespace will already have been created.
-    #   * This method runs in an exception handler.
-    def _parse_known_args(self, arg_strings, namespace):
-        """precedence: cmd args > env var > preexisting namespace > defaults"""
+    # The setup and teardown code for each parsing method. This is what runs
+    # parse_args_post, fetching environment variables for missing actions. See
+    # the comments at __init__::_parsing_depth for more information.
+    #
+    # precedence: cmd args > env var > preexisting namespace > defaults
+    @decorator.decorator
+    def setup_parse(f, self, *args, **kwargs):
+        run_setup = not self.parsing_depth
 
-        # If parsing happens again, the set of seen actions should be cleared.
-        # The public parsing methods:
-        #   * parse_args
-        #   * parse_known_args
-        #   * parse_intermixed_args
-        #   * parse_known_intermixed_args
-        # TODO
-        self.seen_actions.clear()
+        if run_setup:
+            self.seen_actions.clear()
 
-        namespace, arg_extras = super()._parse_known_args(arg_strings, namespace)
+        self.parsing_depth += 1
+        try:
+            namespace, arg_extras = f(self, *args, **kwargs)
+        finally:
+            self.parsing_depth -= 1
 
+        if run_setup:
+            self.parse_args_post(namespace, arg_extras)
+
+        return namespace, arg_extras
+
+    parse_known_args = setup_parse\
+            (argparse.ArgumentParser.parse_known_args)
+
+    parse_known_intermixed_args = setup_parse\
+            (argparse.ArgumentParser.parse_known_intermixed_args)
+
+    @decorator.decorator
+    def argument_error_and_exit(f, self, *args, **kwargs):
+        try:
+            return f(self, *args, **kwargs)
+        except argparse.ArgumentError as e:
+            self.error(str(e))
+
+    # Because of the *intermixed* methods we can't piggyback off the exception
+    # handler of _parse_known_args (see previous versions).
+    @argument_error_and_exit
+    def parse_args_post(self, namespace, arg_extras):
         for action in self._actions:
             if action.dest is argparse.SUPPRESS:
                 continue
@@ -159,7 +212,7 @@ class EnvArgParser(argparse.ArgumentParser):
             # now mark the action as seen even though it may be redundant.
             self.seen_actions.add(action)
             # Parse the environment variable.
-            v,e = i.f(self, i.a, i.k, i.v, arg_extras)
+            v,e = i.f(self, i.a, i.k, i.v)
             # From the main loop of "_parse_known_args". Treat additional
             # environment variable arguments just like additional command-line
             # arguments (which will eventually raise an exception).
@@ -177,7 +230,7 @@ class EnvArgParser(argparse.ArgumentParser):
     # be passed in as the first argument anyway. Feel free to raise
     # ArgumentError here. Returns the 2-tuple (used_values, extra_values).
     @staticmethod
-    def env_var_parse(p, a, k, v, e):
+    def env_var_parse(p, a, k, v):
         # Use shlex, yaml, whatever.
         v = shlex.split(v)
 
