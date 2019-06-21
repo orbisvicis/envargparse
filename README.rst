@@ -55,7 +55,7 @@ Example output::
 How it Works
 ============
 
-This module tries to be very simple: it may look longer because it is well-commented. There is no code duplication. In fact version 0.1 (tagged) was even simpler: actions were tracked via the namespace argument of `parse_args()`, maintaining the precedence:
+This module tries to be very simple: it may look longer because it is well-commented. There is no code duplication. In fact version 0.1 (tagged) was even simpler: actions were tracked via the namespace argument of `parse_args()`, maintaining the precedence::
 
    cmd args > env var > preexisting namespace > defaults
 
@@ -152,26 +152,26 @@ The code is well-commented, so here is a brief list of the provided classes:
 Requirements
 ============
 
-   * Python 3.7+
-   * module: `decorator` (`@PyPI`__)
+* Python 3.7+
+* module: `decorator` (`@PyPI`__)
 
 __ decoratorPyPI_
-
-License
-=======
-
-   GPLv3+; see `LICENSE.txt`
 
 Author
 ======
 
-   Yclept Nemo <pscjtwjdjtAhnbjm/dpn>
+Yclept Nemo <pscjtwjdjtAhnbjm/dpn>
+
+License
+=======
+
+GPLv3+; see `LICENSE.txt`
 
 Links
 =====
 
-   * `EnvArgParse@GitHub`__
-   * `EnvArgParse@PyPI`__
+* `EnvArgParse@GitHub`__
+* `EnvArgParse@PyPI`__
 
 __ envargparseGitHub_
 __ envargparsePyPI_
